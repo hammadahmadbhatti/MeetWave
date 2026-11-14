@@ -1,0 +1,139 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+enum ChatStatus {
+  ACTIVE
+  ENDED
+  REPORTED
+}
+
+enum ReportReason {
+  INAPPROPRIATE
+  HARASSMENT
+  SPAM
+  UNDERAGE
+  OTHER
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWED
+  RESOLVED
+  DISMISSED
+}
+
+enum MessageType {
+  TEXT
+  SYSTEM
+}
+
+model User {
+  id           String    @id @default(uuid())
+  username     String    @unique
+  email        String?   @unique
+  passwordHash String?
+  gender       Gender?
+  country      String?
+  avatarUrl    String?
+  isGuest      Boolean   @default(false)
+  isBanned     Boolean   @default(false)
+  banReason    String?
+  banExpiresAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  sessions       Session[]
+  chatsAsUser1   ChatSession[]  @relation("ChatUser1")
+  chatsAsUser2   ChatSession[]  @relation("ChatUser2")
+  reportsFiled   Report[]       @relation("Reporter")
+  reportsAgainst Report[]       @relation("Reported")
+  reviewedReports Report[]      @relation("Reviewer")
+  messages       Message[]
+
+  @@index([email])
+  @@index([isBanned])
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  ipAddress String?
+  userAgent String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+}
+
+model ChatSession {
+  id        String     @id @default(uuid())
+  user1Id   String
+  user2Id   String
+  startedAt DateTime   @default(now())
+  endedAt   DateTime?
+  duration  Int?       // duration in seconds
+  status    ChatStatus @default(ACTIVE)
+
+  user1    User      @relation("ChatUser1", fields: [user1Id], references: [id])
+  user2    User      @relation("ChatUser2", fields: [user2Id], references: [id])
+  messages Message[]
+  reports  Report[]
+
+  @@index([user1Id])
+  @@index([user2Id])
+  @@index([status])
+}
+
+model Report {
+  id            String       @id @default(uuid())
+  reporterId    String
+  reportedId    String
+  chatSessionId String?
+  reason        ReportReason
+  description   String?
+  status        ReportStatus @default(PENDING)
+  createdAt     DateTime     @default(now())
+  reviewedAt    DateTime?
+  reviewedBy    String?
+
+  reporter    User         @relation("Reporter", fields: [reporterId], references: [id])
+  reported    User         @relation("Reported", fields: [reportedId], references: [id])
+  chatSession ChatSession? @relation(fields: [chatSessionId], references: [id])
+  reviewer    User?        @relation("Reviewer", fields: [reviewedBy], references: [id])
+
+  @@index([reporterId])
+  @@index([reportedId])
+  @@index([status])
+}
+
+model Message {
+  id            String      @id @default(uuid())
+  chatSessionId String
+  senderId      String
+  content       String
+  type          MessageType @default(TEXT)
+  createdAt     DateTime    @default(now())
+
+  chatSession ChatSession @relation(fields: [chatSessionId], references: [id], onDelete: Cascade)
+  sender      User        @relation(fields: [senderId], references: [id])
+
+  @@index([chatSessionId])
+  @@index([senderId])
+}

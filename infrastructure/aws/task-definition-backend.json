@@ -1,0 +1,53 @@
+{
+  "family": "meetwave-backend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "runtimePlatform": {
+    "cpuArchitecture": "ARM64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/meetwave-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/meetwave-ecs-task-role",
+  "containerDefinitions": [
+    {
+      "name": "backend",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/meetwave-backend:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 3001,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        { "name": "NODE_ENV", "value": "production" },
+        { "name": "PORT", "value": "3001" },
+        { "name": "CORS_ORIGIN", "value": "https://meetwave.example.com" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/meetwave/database-url" },
+        { "name": "REDIS_URL", "valueFrom": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/meetwave/redis-url" },
+        { "name": "JWT_SECRET", "valueFrom": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/meetwave/jwt-secret" },
+        { "name": "TURN_SERVER_URL", "valueFrom": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/meetwave/turn-server-url" },
+        { "name": "TURN_CREDENTIAL", "valueFrom": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/meetwave/turn-credential" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/meetwave-production-backend",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3001/api/health || exit 1"],
+        "interval": 60,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ]
+}

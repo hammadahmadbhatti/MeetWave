@@ -1,0 +1,454 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "MeetWave - Cost-Optimized Production Infrastructure"
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [staging, production]
+
+  DomainName:
+    Type: String
+    Default: meetwave.example.com
+
+  # ── Cost-Optimized Defaults ──
+  DBInstanceClass:
+    Type: String
+    Default: db.t4g.micro          # ARM-based, cheapest RDS option
+    AllowedValues: [db.t4g.micro, db.t4g.small, db.t4g.medium]
+
+  RedisNodeType:
+    Type: String
+    Default: cache.t4g.micro       # ARM-based, cheapest ElastiCache
+    AllowedValues: [cache.t4g.micro, cache.t4g.small]
+
+  CertificateArn:
+    Type: String
+    Description: ACM Certificate ARN for SSL (free with ACM)
+
+  EnableMultiAZ:
+    Type: String
+    Default: "false"               # Single-AZ to save ~50% on RDS
+    AllowedValues: ["true", "false"]
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, production]
+  UseMultiAZ: !Equals [!Ref EnableMultiAZ, "true"]
+
+Resources:
+  # ─── VPC (Free) ─────────────────────────────────────────
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "meetwave-${Environment}-vpc"
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ─── Security Groups (Free) ────────────────────────────
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Tasks Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3001
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  TURNSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: TURN Server Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3478
+          ToPort: 3478
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: 3478
+          ToPort: 3478
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: 49152
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ElastiCache Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+
+  # ─── RDS PostgreSQL (Cost-Optimized) ───────────────────
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: MeetWave DB Subnets
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: postgres
+      EngineVersion: "15.4"
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 50         # Lower cap to control costs
+      StorageType: gp3
+      DBName: meetwave
+      MasterUsername: "{{resolve:ssm:/meetwave/db/username}}"
+      MasterUserPassword: "{{resolve:ssm-secure:/meetwave/db/password}}"
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      BackupRetentionPeriod: 3        # 3 days instead of 7
+      MultiAZ: !If [UseMultiAZ, true, false]
+      DeletionProtection: !If [IsProduction, true, false]
+      StorageEncrypted: true
+      PerformanceInsightsEnabled: false  # Disable to save cost
+      MonitoringInterval: 0              # Disable enhanced monitoring
+
+  # ─── ElastiCache Redis (Cost-Optimized) ─────────────────
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: MeetWave Redis Subnets
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  RedisCluster:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      Engine: redis
+      CacheNodeType: !Ref RedisNodeType
+      NumCacheNodes: 1               # Single node is sufficient
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref RedisSecurityGroup
+
+  # ─── ECS Cluster (Fargate Spot for cost savings) ────────
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "meetwave-${Environment}"
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT  # 70% cheaper than regular Fargate
+          Weight: 4
+        - CapacityProvider: FARGATE       # Fallback for reliability
+          Weight: 1
+
+  # ─── ALB (Required, but we use one for both services) ───
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "meetwave-${Environment}-alb"
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Scheme: internet-facing
+
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref FrontendTargetGroup
+
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  APIListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HTTPSListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: ["/api/*", "/socket.io/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
+
+  FrontendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Port: 3000
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 60  # Less frequent = fewer health check costs
+      Matcher:
+        HttpCode: "200"
+
+  BackendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Port: 3001
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /api/health
+      HealthCheckIntervalSeconds: 60
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: "true"
+        - Key: stickiness.type
+          Value: lb_cookie
+
+  # ─── ECS Task Execution Role ────────────────────────────
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                  - ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/meetwave/*"
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  # ─── CloudWatch (Minimal retention to save $) ──────────
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/meetwave-${Environment}-backend"
+      RetentionInDays: 7             # 7 days instead of 30
+
+  FrontendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/meetwave-${Environment}-frontend"
+      RetentionInDays: 7
+
+  # ─── Auto Scaling (Start at 1, not 2) ──────────────────
+  BackendAutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: 1                  # Start with 1, scale up as needed
+      MaxCapacity: 5
+      ResourceId: !Sub "service/${ECSCluster}/meetwave-backend"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+
+  BackendCPUScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: BackendCPUScaling
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref BackendAutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 75               # Higher threshold = scale later = save $
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 120
+
+  # ─── ECR Repositories ──────────────────────────────────
+  BackendECR:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: meetwave-backend
+      ImageScanningConfiguration:
+        ScanOnPush: false             # Disable to save costs
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "selection": {
+                "tagStatus": "untagged",
+                "countType": "sinceImagePushed",
+                "countUnit": "days",
+                "countNumber": 7
+              },
+              "action": { "type": "expire" }
+            }]
+          }
+
+  FrontendECR:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: meetwave-frontend
+      ImageScanningConfiguration:
+        ScanOnPush: false
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "selection": {
+                "tagStatus": "untagged",
+                "countType": "sinceImagePushed",
+                "countUnit": "days",
+                "countNumber": 7
+              },
+              "action": { "type": "expire" }
+            }]
+          }
+
+Outputs:
+  LoadBalancerDNS:
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Description: ALB DNS Name - point your domain here
+  VPCId:
+    Value: !Ref VPC
+  ECSClusterName:
+    Value: !Ref ECSCluster
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  RedisEndpoint:
+    Value: !GetAtt RedisCluster.RedisEndpoint.Address
+  BackendECRUri:
+    Value: !GetAtt BackendECR.RepositoryUri
+  FrontendECRUri:
+    Value: !GetAtt FrontendECR.RepositoryUri
